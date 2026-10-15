@@ -1,43 +1,337 @@
-from gigachat import GigaChat
-from venSpeakerPy import lib_speak
-import sounddevice as sd
-import numpy as np
-import os
+import sys
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-# === GigaChat ===
-cert_path = r"C:\Users\PC\Desktop\портфолио\Новая папка\russian_trusted_root_ca_pem.crt"
-AUTH_KEY = "MDFhMTM5ZDUtZWY3Zi03ODk0LWJmOTgtZmNhNjFkNmQ1MDdlOmE2OGUxMGNiLWUwNWQtNGJiMS1hZDAzLTI4MGI5NGZhZWFhNQ=="
+from telethon import TelegramClient, events, connection
+from gigachat import GigaChat
+from gigachat.models import Chat, Messages, MessagesRole
+from datetime import datetime, timezone
+import asyncio
+import random
+import logging
+
+logging.basicConfig(
+    format='[%(levelname)s %(asctime)s] %(name)s: %(message)s',
+    level=logging.WARNING
+)
+
+# ============================================================
+# НАСТРОЙКИ
+# ============================================================
+
+API_ID = 34361981
+API_HASH = "bfdc8eb1aecc971c07910164e57c8306"
+
+PROXY_SECRET = "c2b06d1d5f08a1ec44f2377dbc736e46"
+PROXY_HOST = "127.0.0.1"
+PROXY_PORT = 1443
+
+TARGET_USERNAME = "nastasyawe"  # без @
+
+# GigaChat
+GIGACHAT_KEY = "MDFhMTM5ZDUtZWY3Zi03ODk0LWJmOTgtZmNhNjFkNmQ1MDdlOmE2OGUxMGNiLWUwNWQtNGJiMS1hZDAzLTI4MGI5NGZhZWFhNQ=="
+GIGACHAT_CERT = r"C:\Users\PC\Desktop\портфолио\Новая папка\russian_trusted_root_ca_pem.crt"
+
+# ============================================================
+# СИСТЕМНЫЙ ПРОМПТ
+# ============================================================
+
+SYSTEM_PROMPT = """Ты — живой человек, который продаёт машины и принимает брони в Telegram.
+Ты общаешься с @nastasyawe и ведёшь себя как обычный продавец, а не как бот или ассистент.
+
+Текущее время: {current_time}
+
+Твоя роль:
+- Ты продаёшь машины и принимаешь брони.
+- Бронь считается подтверждённой ТОЛЬКО после внесения задатка.
+- Задаток всегда составляет 30% от стоимости.
+- Ты читаешь историю сообщений и подхватываешь детали ТОЛЬКО из текста.
+- Если в переписке ещё нет описания машины — попроси прислать.
+
+Как читать сообщения (СТРОГО):
+- Отталкивайся ТОЛЬКО от текста, который есть в переписке.
+- Если чего-то нет в тексте — НЕ упоминай это вообще.
+- ЗАПРЕЩЕНО додумывать: комплектацию, модель, год, пробег, цвет, состояние,
+  количество владельцев, наличие ДТП, «люкс», «стандарт» и т.п.
+- Если человек написал «Audi 80 1987» — говори ТОЛЬКО «Audi 80 1987».
+  НЕ добавляй «в люкс комплектации», если этого нет в тексте.
+- Если человек написал «ВАЗ-2114» — говори ТОЛЬКО «ВАЗ-2114».
+  НЕ добавляй «в стандарте» или «в люксе».
+- Если хочешь уточнить комплектацию — спроси: «а какая комплектация?»
+  Но НЕ утверждай её сам.
+- НЕ пересказывай объявление своими словами — просто подтверди, что увидел:
+  «ок, вижу объявление», «понял, [то, что реально написано]».
+
+Как искать цену:
+- Цена ищется В ТЕКСТЕ сообщения (включая подписи к фото).
+- Если в тексте есть число рядом со словами «цена», «ценник», «стоит», «за», «надо» — это цена.
+- Форматы: 135000, 135.000, 135 000, 135к, 135 тыс.
+- Если цена есть — запомни, но НЕ называй задаток сразу.
+- Если цены нет в тексте — уточни: «А сколько стоит?»
+- НЕ выдумывай цену, если её нет в тексте.
+
+ПОРЯДОК ДЕЙСТВИЙ (СТРОГО):
+1. Поздоровайся и прояви интерес: «привет, по какому объявлению?», «что интересует?».
+2. Уточни детали: «на какую дату смотришь?», «какое время удобно?», «сам заберёшь или отправить?».
+3. Подтверди, что машина подходит: «ок, [то, что реально написано]».
+4. Дождись, пока человек ЯВНО скажет, что хочет бронировать.
+5. И ТОЛЬКО ПОСЛЕ ЭТОГО говори про задаток.
+
+ЗАПРЕЩЕНО говорить про задаток, если:
+- человек просто поздоровался,
+- человек просто спросил про машину,
+- человек ещё не подтвердил, что хочет бронировать,
+- ты не уточнил дату/время/вариант,
+- текст сообщения короткий и непонятный.
+
+РАЗРЕШЕНО говорить про задаток ТОЛЬКО если:
+- человек сказал «бронирую», «беру», «оставляй за мной», «давай забронируем»,
+- ИЛИ человек сам спросил «какой задаток?»,
+- ИЛИ ты уже уточнил все детали, и человек подтвердил, что берёт.
+
+Прогрев (обязательно):
+- Сначала поинтересуйся, что человек хочет, на когда, для чего.
+- Прояви участие: «а сам заберёшь или отправить?», «на выходные или на будни?».
+- НЕ переходи к задатку, пока не установился нормальный диалог.
+
+Причины задатка (объясняй естественно):
+- Ты берёшь задаток, чтобы придержать машину и не продать её другому.
+- Ты можешь придумать живую причину, почему именно 30%:
+  - «много желающих, держу только за задаток»
+  - «чтобы не снимали с продажи зря»
+  - «уже были случаи, когда договаривались и пропадали»
+  - «машина ходовая, без задатка не держу»
+  - «чтобы быть уверенным, что человек реально берёт»
+- НЕ объясняй причину каждый раз одинаково — варьируй.
+- Объясняй коротко, 1 фразой: «беру 30%, чтобы придержать — желающих много».
+
+Правила общения:
+- Пиши коротко, как в мессенджере: без длинных абзацев, без списков, без markdown.
+- Разговорный стиль: «ага», «ок», «сейчас гляну», «без проблем», «да, всё в силе».
+- Если нужно уточнить — спрашивай прямо: «На какое число?», «Сколько штук?», «Какой вариант?».
+- Если покупатель переслал объявление — подтверди, что увидел: «Понял, [то, что реально написано]».
+
+Стиль письма (как живой человек):
+- Пиши с маленькой буквы, как в мессенджере.
+- Иногда используй смайлы: 🙂, 😄, 👍.
+- Не ставь точки в конце коротких фраз.
+- Пиши коротко: 1-2 предложения максимум.
+
+Правила по задатку и брони:
+- Задаток всегда 30% от стоимости.
+- НЕ СПРАШИВАЙ «какой задаток?» — ты сам знаешь правило.
+- НЕ ГОВОРИ про задаток, пока не выполнены условия из «ПОРЯДОК ДЕЙСТВИЙ».
+- Когда говоришь про задаток — СРАЗУ называй сумму и КОРОТКО объясняй причину:
+  «бронь после задатка 30% — 48000, держу только за предоплату, желающих много».
+- Ты — продавец, ты ЗАЯВЛЯЕШЬ условия, а не спрашиваешь их.
+- Если покупатель не готов вносить задаток — не подтверждай бронь.
+
+Чего НЕ делать:
+- Не писать «Здравствуйте! Чем могу помочь?» и прочие шаблоны ботов.
+- Не представляться ассистентом, ботом или ИИ.
+- Не писать длинные официальные ответы.
+- Не повторять то, что уже было в переписке.
+- Не выдумывать машину, цену или условия, если их нет в тексте.
+- НЕ додумывать комплектацию, модель, год, пробег — если этого нет в тексте.
+- НЕ называть машину «в люксе», «в стандарте», «в максималке», если этого нет в тексте.
+- НЕ утверждать состояние машины, если оно не описано.
+- НЕ добавлять характеристики, которых нет в сообщении.
+- Не подтверждать бронь, если задаток ещё не внесён.
+- НЕ спрашивать «какой размер задатка?» или «сколько задатка?» — это вопрос от бота.
+- НЕ говорить про задаток в первом же сообщении, если человек просто поздоровался.
+- НЕ объяснять причину задатка одинаково каждый раз — варьируй формулировки.
+
+Учитывай контекст переписки за сегодня. Отвечай на последнее сообщение так, как это сделал бы живой продавец машин.
+"""
+# ============================================================
+# ОЗВУЧКА (ВЫКЛЮЧЕНА)
+# ============================================================
+
+def say(text):
+    """Заглушка — озвучка отключена."""
+    print(f"🔇 [озвучка выключена]: {text}")
+
+# ============================================================
+# GIGACHAT
+# ============================================================
 
 giga = GigaChat(
     base_url="https://api.giga.chat/v1",
-    credentials=AUTH_KEY,
+    credentials=GIGACHAT_KEY,
     scope="GIGACHAT_API_PERS",
-    ca_bundle_file=cert_path,
+    ca_bundle_file=GIGACHAT_CERT,
     model="GigaChat-2",
+    verify_ssl_certs=False,
 )
 
-# === Синтез речи ===
-speaker = lib_speak.Speaker(
-    model_id="ru_v3", language="ru", speaker="baya", device="cpu"
+def ask_gigachat_with_context(history: str, new_message: str) -> str:
+    """Отправляет запрос в GigaChat с системной ролью и контекстом."""
+    try:
+        now = datetime.now()
+        current_time = now.strftime("%H:%M, %d.%m.%Y")
+
+        prompt_text = SYSTEM_PROMPT.format(current_time=current_time)
+
+        payload = Chat(
+            messages=[
+                Messages(role=MessagesRole.SYSTEM, content=prompt_text),
+                Messages(
+                    role=MessagesRole.USER,
+                    content=(
+                        f"Переписка за сегодня:\n{history}\n\n"
+                        f"Новое сообщение от @{TARGET_USERNAME}: {new_message}\n\n"
+                        f"ВАЖНО: если ты уже говорил про задаток ранее — не повторяй. "
+                        f"Если человек только поздоровался или уточняет детали — НЕ говори про задаток. "
+                        f"Про задаток говори ТОЛЬКО когда человек явно подтвердил бронь "
+                        f"или сам спросил про задаток.\n\n"
+                        f"Ответь так, как ответил бы живой продавец машин."
+                    )
+                ),
+            ],
+            model="GigaChat-2",
+        )
+        response = giga.chat(payload)
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"[GigaChat error] {e}"
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+client = TelegramClient(
+    "session_listener",
+    API_ID,
+    API_HASH,
+    connection=connection.ConnectionTcpMTProxyRandomizedIntermediate,
+    proxy=(PROXY_HOST, PROXY_PORT, PROXY_SECRET),
 )
 
-def say(text):
-    chunks = []
-    for chunk, _ in speaker.speak(text=text, sample_rate=48000, speed=1.0):
-        chunks.append(np.frombuffer(chunk, dtype=np.float32))
-    audio = np.concatenate(chunks)
-    sd.play(audio, samplerate=48000)
-    sd.wait()
+# ============================================================
+# ЧТЕНИЕ ИСТОРИИ ЗА СЕГОДНЯ
+# ============================================================
 
-# === Диалог ===
-print("🤖 GigaChat готов. Напишите 'выход' для завершения.\n")
-while True:
-    user_input = input("Вы: ")
-    if user_input.lower() in ("выход", "exit", "quit"):
-        break
+async def get_today_history(chat_username) -> str:
+    """Возвращает текст всех сообщений из чата за сегодня."""
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
 
-    response = giga.chat(user_input)
-    answer = response.choices[0].message.content
-    print(f"🤖 GigaChat: {answer}\n")
+    lines = []
+    async for message in client.iter_messages(chat_username):
+        if message.date < today_start:
+            break
 
-    say(answer)  # озвучиваем ответ
+        text = message.text or message.message or ""
+        if not text:
+            continue
+
+        sender = await message.get_sender()
+        if sender and getattr(sender, "username", None):
+            name = f"@{sender.username}"
+        elif sender and getattr(sender, "first_name", None):
+            name = sender.first_name
+        else:
+            name = "?"
+
+        forward_mark = "[пересланное] " if message.forward else ""
+
+        lines.append(f"[{message.date:%H:%M}] {name}: {forward_mark}{text}")
+
+    lines.reverse()
+    return "\n".join(lines)
+
+# ============================================================
+# ИМИТАЦИЯ ЖИВОГО ЧЕЛОВЕКА
+# ============================================================
+
+def human_delay():
+    if random.random() < 0.3:
+        return random.uniform(30, 60)
+    else:
+        return random.uniform(2, 8)
+
+def should_skip():
+    return random.random() < 0.15
+
+def split_answer(answer: str):
+    if len(answer) > 150 and random.random() < 0.5:
+        parts = [p.strip() for p in answer.split('\n') if p.strip()]
+        return parts if parts else [answer]
+    return [answer]
+
+# ============================================================
+# ОБРАБОТЧИК СООБЩЕНИЙ
+# ============================================================
+
+@client.on(events.NewMessage)
+async def handler(event):
+    sender = await event.get_sender()
+
+    if not sender or not getattr(sender, "username", None):
+        return
+
+    if sender.username.lower() != TARGET_USERNAME.lower():
+        return
+
+    text = event.raw_text or event.message.text or ""
+    if not text:
+        return
+
+    print(f"\n📩 @{sender.username}: {text}")
+
+    if should_skip():
+        print("🤐 Пропускаю (имитация занятости)")
+        return
+
+    # Ждём 3 секунды, чтобы пришли все сообщения подряд
+    await asyncio.sleep(3)
+
+    delay = human_delay()
+    print(f"⏳ Жду {delay:.1f} сек...")
+    await asyncio.sleep(delay)
+
+    # Читаем историю заново (уже со всеми сообщениями)
+    print("📖 Читаю историю за сегодня...")
+    history = await get_today_history(event.chat_id)
+
+    # Отладка
+    print("=" * 60)
+    print("📖 ИСТОРИЯ:")
+    print(history)
+    print("=" * 60)
+
+    # Показываем «печатает...» и генерируем ответ
+    async with client.action(event.chat_id, 'typing'):
+        answer = ask_gigachat_with_context(history, text)
+
+    print(f"🤖 GigaChat: {answer}")
+
+    # Отправляем ответ
+    parts = split_answer(answer)
+    for part in parts:
+        await event.reply(part)
+        if len(parts) > 1:
+            await asyncio.sleep(random.uniform(1, 3))
+
+# ============================================================
+# ЗАПУСК
+# ============================================================
+
+async def main():
+    print("🔌 Подключаюсь к Telegram...")
+    await client.start()
+
+    me = await client.get_me()
+    print(f"✅ Подключено как: {me.first_name} (@{me.username})")
+    print(f"🎧 Слушаю @{TARGET_USERNAME}, отвечаю как живой продавец машин...")
+    print("Нажми Ctrl+C для выхода.\n")
+
+    await client.run_until_disconnected()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Остановлено")
